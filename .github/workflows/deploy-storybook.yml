@@ -6,7 +6,7 @@ on:
     - cron: '*/30 * * * *'
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -22,6 +22,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout host repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Checkout source repository
         uses: actions/checkout@v4
         with:
@@ -30,7 +35,30 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
           path: source
 
+      - name: Detect source changes
+        id: detect_changes
+        shell: bash
+        run: |
+          current_sha="$(git -C source rev-parse HEAD)"
+
+          if [[ -f .last-source-sha ]]; then
+            last_sha="$(cat .last-source-sha)"
+          else
+            last_sha=""
+          fi
+
+          echo "current_sha=$current_sha" >> "$GITHUB_OUTPUT"
+
+          if [[ "$current_sha" == "$last_sha" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No source changes detected. Skipping build and deploy."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Source changed from '$last_sha' to '$current_sha'."
+          fi
+
       - name: Setup Node.js
+        if: steps.detect_changes.outputs.changed == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -38,21 +66,37 @@ jobs:
           cache-dependency-path: source/package-lock.json
 
       - name: Install dependencies
+        if: steps.detect_changes.outputs.changed == 'true'
         working-directory: source
         run: npm ci
 
       - name: Build Storybook
+        if: steps.detect_changes.outputs.changed == 'true'
         working-directory: source
         run: npm run storybook-build
 
       - name: Setup Pages
+        if: steps.detect_changes.outputs.changed == 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload Storybook artifact
+        if: steps.detect_changes.outputs.changed == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: source/storybook-static
 
       - name: Deploy to GitHub Pages
+        if: steps.detect_changes.outputs.changed == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Persist deployed source SHA
+        if: steps.detect_changes.outputs.changed == 'true'
+        shell: bash
+        run: |
+          echo "${{ steps.detect_changes.outputs.current_sha }}" > .last-source-sha
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .last-source-sha
+          git commit -m "Update last deployed source SHA" || exit 0
+          git push
